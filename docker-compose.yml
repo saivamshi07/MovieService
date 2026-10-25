@@ -1,0 +1,146 @@
+services:
+  # ============================================================================
+  # 1. PostgreSQL 17 Primary Database
+  # ============================================================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: movie-service-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: movieServiceDB
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - movie_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d movieServiceDB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - movie-network
+
+  # ============================================================================
+  # 2. Redis 7 High-Speed In-Memory Cache (LRU Eviction)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: movie-service-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save "" --appendonly no
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - movie_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - movie-network
+
+  # ============================================================================
+  # 3. Apache Kafka (KRaft Mode - No Zookeeper Needed)
+  # ============================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: movie-service-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - movie-network
+
+  # ============================================================================
+  # 4. Kafka Topic Auto-Initializer
+  # ============================================================================
+  kafka-init-topics:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: movie-service-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # Wait for Kafka broker
+      kafka-topics --bootstrap-server kafka:29092 --list
+
+      echo -e 'Creating Kafka topic: movie.rating.v1'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic movie.rating.v1 --replication-factor 1 --partitions 3
+
+      echo -e 'Kafka topics successfully initialized:'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+    networks:
+      - movie-network
+
+  # ============================================================================
+  # 5. Movie Service Application (Spring Boot 4.1.1, Java 21)
+  # ============================================================================
+  movie-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: movie-service-app
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      SERVER_PORT: 8082
+      DB_URL: jdbc:postgresql://postgres:5432/movieServiceDB
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC_MOVIE_RATING: movie.rating.v1
+      JWT_SECRET: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      GATEWAY_SHARED_SECRET: local-dev-gateway-secret
+      TMDB_BASE_URL: https://api.themoviedb.org/3
+      TMDB_BEARER_TOKEN: eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM2FmZDExMWYxMjRlNTE0OWE5MzZiY2FkOGZmOTYyYSIsIm5iZiI6MTc2NDc5NDMxNi4wNiwic3ViIjoiNjkzMDlmY2NjMDQ4Y2UzNTRmNjMxZDkzIiwic2NvcGVzIjpbImFwaV9yZWFkIl0sInZlcnNpb24iOjF9.PIuhus3qmnqTipyB8CBj0f53ziNF2OvfC604U43kRow
+      RECOMMENDATION_SERVICE_URL: http://recommendation-service:8083
+      PREWARM_ENABLED: "true"
+      PREWARM_TOP_MOVIES_LIMIT: 10
+      PREWARM_THROTTLE_DELAY_MS: 250
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - movie-network
+
+volumes:
+  movie_postgres_data:
+  movie_redis_data:
+
+networks:
+  movie-network:
+    name: movie-microservices-network
+    driver: bridge
