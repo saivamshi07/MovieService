@@ -5,6 +5,7 @@ import com.platform.movieservice.dto.tmdb.TmdbMovieResult;
 import com.platform.movieservice.dto.tmdb.TmdbPageResponse;
 import com.platform.movieservice.entity.enums.CinemaIndustry;
 import com.platform.movieservice.entity.enums.MovieGenre;
+import com.platform.movieservice.repository.ReviewRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +25,7 @@ public class RecommendationClientService {
     private final UserPreferenceService userPreferenceService;
     private final HomeFeedService homeFeedService;
     private final TmdbService tmdbService;
+    private final ReviewRepository reviewRepository;
 
     @Value("${recommendation.service.base-url:http://localhost:8083}")
     private String recommendationServiceBaseUrl;
@@ -34,50 +36,46 @@ public class RecommendationClientService {
     @Value("${recommendation.service.read-timeout-ms:2000}")
     private int readTimeoutMs;
 
-    private static final int TARGET_RECOMMENDATION_COUNT = 50;
+    private static final int TOP_CANDIDATE_POOL_SIZE = 50;
+    private static final int TARGET_RECOMMENDATION_COUNT = 20;
 
     /**
-     * Recommends exactly 50 movies at any given stage:
-     * 1. Calls recommendation-service for ML predictions.
-     * 2. If fewer than 50 returned, backfills the deficit using user's preferred industries & genres
-     *    ordered by rating from highest to lowest.
-     * 3. Hydrates all cards via the 3-Tier Cache (Redis -> DB -> TMDB).
+     * Recommends up to TARGET_RECOMMENDATION_COUNT (20) movies:
+     * 1. Fetches top 50 movies from TMDB for user preferred genres & industries sorted by vote_count.desc.
+     * 2. Filters out any movies already rated by the user.
+     * 3. Sorts the remaining movies by voting_average descending.
+     * 4. Limits the result to 20 items and hydrates them via CatalogService.
      */
     public List<MovieCardDTO> getPersonalizedRecommendations(UUID userId) {
-        Set<Long> chosenMovieIds = new LinkedHashSet<>();
-        Map<Long, String> matchScores = new HashMap<>();
+        // 1. Fetch user's rated movie IDs to filter out
+        Set<Long> ratedMovieIds = (userId != null) ?
+                new HashSet<>(reviewRepository.findMovieIdsByUserId(userId)) : Collections.emptySet();
+
+        // 2. Fetch top 50 movies from TMDB with vote_count.desc for user's preferred genres & industries
         Map<Long, String> matchReasons = new HashMap<>();
+        List<TmdbMovieResult> topFiftyCandidates = fetchTopFiftyByPreferred(userId, matchReasons);
 
-        // Step 1: Call recommendation-service
-        List<RecommendationServiceResponse.PredictionItem> predictions = fetchPredictionsFromRecService(userId);
-        if (predictions != null) {
-            for (RecommendationServiceResponse.PredictionItem item : predictions) {
-                try {
-                    Long movieId = Long.valueOf(item.getItemId());
-                    if (chosenMovieIds.add(movieId)) {
-                        if (item.getScore() != null) {
-                            int matchPct = (int) Math.round(item.getScore() * 100);
-                            matchScores.put(movieId, matchPct + "% Match");
-                        }
-                        matchReasons.put(movieId, "RECOMMENDED_FOR_YOU");
-                    }
-                    if (chosenMovieIds.size() >= TARGET_RECOMMENDATION_COUNT) {
-                        break;
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
+        // 3. Filter out already rated movies
+        List<TmdbMovieResult> unratedMovies = topFiftyCandidates.stream()
+                .filter(m -> m.getId() != null && !ratedMovieIds.contains(m.getId()))
+                .toList();
 
-        // Step 2: Waterfall Backfill if deficit exists (target 50 movies)
-        if (chosenMovieIds.size() < TARGET_RECOMMENDATION_COUNT) {
-            int deficit = TARGET_RECOMMENDATION_COUNT - chosenMovieIds.size();
-            log.debug("Recommendation service returned {} items. Backfilling deficit of {} items.", chosenMovieIds.size(), deficit);
-            backfillDeficit(userId, chosenMovieIds, matchReasons, deficit);
-        }
+        // 4. Sort remaining movies by voting_average descending
+        List<TmdbMovieResult> sortedByVoteAverage = unratedMovies.stream()
+                .sorted(Comparator.comparing(
+                        (TmdbMovieResult m) -> m.getVoteAverage() != null ? m.getVoteAverage() : 0.0,
+                        Comparator.reverseOrder()
+                ).thenComparing(
+                        (TmdbMovieResult m) -> m.getVoteCount() != null ? m.getVoteCount() : 0L,
+                        Comparator.reverseOrder()
+                ))
+                .limit(TARGET_RECOMMENDATION_COUNT)
+                .toList();
 
-        // Step 3: Hydrate all 50 movie cards
+        // 5. Hydrate movie cards
         List<MovieCardDTO> finalCards = new ArrayList<>();
-        for (Long movieId : chosenMovieIds) {
+        for (TmdbMovieResult movie : sortedByVoteAverage) {
+            Long movieId = movie.getId();
             try {
                 MovieDetailDTO detail = catalogService.getMovieDetail(movieId);
                 if (detail != null) {
@@ -93,20 +91,149 @@ public class RecommendationClientService {
                             .industry(detail.getIndustry())
                             .genres(detail.getGenres())
                             .tmdbVoteAverage(detail.getTmdbVoteAverage())
+                            .tmdbVoteCount(detail.getTmdbVoteCount())
                             .platformRating(detail.getPlatformRating())
                             .platformRatingCount(detail.getPlatformRatingCount())
-                            .matchScore(matchScores.get(movieId))
                             .matchReason(matchReasons.getOrDefault(movieId, "TOP_RATED_IN_FAVORITE_GENRE"))
                             .build());
+                } else {
+                    finalCards.add(mapTmdbResultToCard(movie, matchReasons.getOrDefault(movieId, "TOP_RATED_IN_FAVORITE_GENRE")));
                 }
             } catch (Exception e) {
-                log.warn("Failed to hydrate recommendation card {}: {}", movieId, e.getMessage());
+                log.warn("Failed to hydrate recommendation card {}: {}. Using fallback card.", movieId, e.getMessage());
+                finalCards.add(mapTmdbResultToCard(movie, matchReasons.getOrDefault(movieId, "TOP_RATED_IN_FAVORITE_GENRE")));
             }
         }
 
         return finalCards;
     }
 
+    private List<TmdbMovieResult> fetchTopFiftyByPreferred(UUID userId, Map<Long, String> matchReasons) {
+        UserPreferenceResponse preferences = userId != null ? userPreferenceService.getPreferences(userId) : null;
+
+        List<String> industries = (preferences != null && preferences.getIndustries() != null && !preferences.getIndustries().isEmpty()) ?
+                new ArrayList<>(preferences.getIndustries()) : List.of("HOLLYWOOD", "TOLLYWOOD", "BOLLYWOOD");
+
+        List<String> genres = (preferences != null && preferences.getGenres() != null && !preferences.getGenres().isEmpty()) ?
+                new ArrayList<>(preferences.getGenres()) : List.of("ACTION", "THRILLER", "DRAMA");
+
+        Map<Long, TmdbMovieResult> candidatesMap = new LinkedHashMap<>();
+
+        // Loop over preferred industries and genres querying TMDB with vote_count.desc
+        for (String indName : industries) {
+            if (candidatesMap.size() >= TOP_CANDIDATE_POOL_SIZE) break;
+
+            CinemaIndustry industry = CinemaIndustry.fromString(indName);
+            String langCode = industry != CinemaIndustry.ALL ? industry.getOriginalLanguageCode() : null;
+
+            for (String genreName : genres) {
+                if (candidatesMap.size() >= TOP_CANDIDATE_POOL_SIZE) break;
+
+                Integer resolvedId = tmdbService.resolveGenreId(genreName);
+                String genreId = resolvedId != null ? String.valueOf(resolvedId) : null;
+
+                for (int page = 1; page <= 3; page++) {
+                    if (candidatesMap.size() >= TOP_CANDIDATE_POOL_SIZE) break;
+
+                    TmdbPageResponse<TmdbMovieResult> pageResp = tmdbService.discoverMovies(langCode, genreId, "vote_count.desc", page);
+                    if (pageResp != null && pageResp.getResults() != null) {
+                        for (TmdbMovieResult movie : pageResp.getResults()) {
+                            if (movie != null && movie.getId() != null && !candidatesMap.containsKey(movie.getId())) {
+                                candidatesMap.put(movie.getId(), movie);
+                                matchReasons.putIfAbsent(movie.getId(), "TOP_VOTED_IN_" + indName);
+                                if (candidatesMap.size() >= TOP_CANDIDATE_POOL_SIZE) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Safety fallback if still fewer than 50 candidates: discover by vote_count.desc without language/genre filter
+        if (candidatesMap.size() < TOP_CANDIDATE_POOL_SIZE) {
+            for (int page = 1; page <= 3 && candidatesMap.size() < TOP_CANDIDATE_POOL_SIZE; page++) {
+                TmdbPageResponse<TmdbMovieResult> pageResp = tmdbService.discoverMovies(null, null, "vote_count.desc", page);
+                if (pageResp != null && pageResp.getResults() != null) {
+                    for (TmdbMovieResult movie : pageResp.getResults()) {
+                        if (movie != null && movie.getId() != null && !candidatesMap.containsKey(movie.getId())) {
+                            candidatesMap.put(movie.getId(), movie);
+                            matchReasons.putIfAbsent(movie.getId(), "GLOBAL_TOP_VOTED");
+                            if (candidatesMap.size() >= TOP_CANDIDATE_POOL_SIZE) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Additional fallback: HomeFeedService TOP_RATED section
+        if (candidatesMap.size() < TOP_CANDIDATE_POOL_SIZE) {
+            SectionResponseDTO topRatedSection = homeFeedService.getSectionFeed(HomeFeedService.SECTION_TOP_RATED, 1);
+            if (topRatedSection != null && topRatedSection.getMovies() != null) {
+                for (MovieCardDTO movie : topRatedSection.getMovies()) {
+                    if (movie != null && movie.getId() != null && !candidatesMap.containsKey(movie.getId())) {
+                        TmdbMovieResult res = new TmdbMovieResult();
+                        res.setId(movie.getId());
+                        res.setTitle(movie.getTitle());
+                        res.setOverview(movie.getOverview());
+                        res.setPosterPath(movie.getPosterUrl());
+                        res.setBackdropPath(movie.getBackdropUrl());
+                        res.setReleaseDate(movie.getReleaseDate());
+                        res.setOriginalLanguage(movie.getOriginalLanguage());
+                        res.setVoteAverage(movie.getTmdbVoteAverage());
+                        res.setVoteCount(movie.getTmdbVoteCount() != null ? movie.getTmdbVoteCount() : 1000L);
+                        candidatesMap.put(movie.getId(), res);
+                        matchReasons.putIfAbsent(movie.getId(), "GLOBAL_TOP_RATED");
+                        if (candidatesMap.size() >= TOP_CANDIDATE_POOL_SIZE) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        List<TmdbMovieResult> list = new ArrayList<>(candidatesMap.values());
+        list.sort(Comparator.comparing(
+                (TmdbMovieResult m) -> m.getVoteCount() != null ? m.getVoteCount() : 0L,
+                Comparator.reverseOrder()
+        ));
+        if (list.size() > TOP_CANDIDATE_POOL_SIZE) {
+            return new ArrayList<>(list.subList(0, TOP_CANDIDATE_POOL_SIZE));
+        }
+        return list;
+    }
+
+    private MovieCardDTO mapTmdbResultToCard(TmdbMovieResult movie, String matchReason) {
+        Integer year = null;
+        if (movie.getReleaseDate() != null && movie.getReleaseDate().length() >= 4) {
+            try { 
+                year = Integer.parseInt(movie.getReleaseDate().substring(0, 4)); 
+            } catch (Exception ignored) {}
+        }
+        CinemaIndustry industry = CinemaIndustry.fromString(movie.getOriginalLanguage());
+        return MovieCardDTO.builder()
+                .id(movie.getId())
+                .title(movie.getTitle())
+                .overview(movie.getOverview())
+                .posterUrl(tmdbService.buildPosterUrl(movie.getPosterPath(), "w500"))
+                .backdropUrl(tmdbService.buildBackdropUrl(movie.getBackdropPath(), "w1280"))
+                .releaseDate(movie.getReleaseDate())
+                .releaseYear(year)
+                .originalLanguage(movie.getOriginalLanguage())
+                .industry(industry != CinemaIndustry.ALL ? industry.name() : "GLOBAL")
+                .genres(List.of())
+                .tmdbVoteAverage(movie.getVoteAverage())
+                .tmdbVoteCount(movie.getVoteCount())
+                .platformRating(0.0)
+                .platformRatingCount(0L)
+                .matchReason(matchReason)
+                .build();
+    }
+
+    @SuppressWarnings("unused")
     private List<RecommendationServiceResponse.PredictionItem> fetchPredictionsFromRecService(UUID userId) {
         if (userId == null) {
             return List.of();
@@ -136,65 +263,9 @@ public class RecommendationClientService {
                 return response.getPredictions();
             }
         } catch (Exception e) {
-            log.warn("Recommendation service call failed or timed out ({}). Activating top-rated waterfall fallback.", e.getMessage());
+            log.warn("Recommendation service call failed or timed out ({}).", e.getMessage());
         }
 
         return List.of();
-    }
-
-    /**
-     * Backfills deficit with movies from user's preferred industry & genre ordered by rating highest to lowest!
-     */
-    private void backfillDeficit(UUID userId, Set<Long> chosenMovieIds, Map<Long, String> matchReasons, int neededCount) {
-        UserPreferenceResponse preferences = userId != null ? userPreferenceService.getPreferences(userId) : null;
-
-        List<String> industries = (preferences != null && !preferences.getIndustries().isEmpty()) ?
-                new ArrayList<>(preferences.getIndustries()) : List.of("HOLLYWOOD", "TOLLYWOOD", "BOLLYWOOD");
-
-        List<String> genres = (preferences != null && !preferences.getGenres().isEmpty()) ?
-                new ArrayList<>(preferences.getGenres()) : List.of("ACTION", "THRILLER", "DRAMA");
-
-        // Fetch top rated per preferred industry and genre
-        for (String indName : industries) {
-            if (chosenMovieIds.size() >= TARGET_RECOMMENDATION_COUNT) break;
-
-            CinemaIndustry industry = CinemaIndustry.fromString(indName);
-            String langCode = industry.getOriginalLanguageCode();
-
-            for (String genreName : genres) {
-                if (chosenMovieIds.size() >= TARGET_RECOMMENDATION_COUNT) break;
-
-                MovieGenre genre = MovieGenre.fromString(genreName);
-                String genreId = genre != null ? String.valueOf(genre.getTmdbId()) : null;
-
-                // Discover sorted by vote_average.desc (highest to lowest rating)
-                TmdbPageResponse<TmdbMovieResult> topRatedPage = tmdbService.discoverMovies(langCode, genreId, "vote_average.desc", 1);
-                if (topRatedPage != null && topRatedPage.getResults() != null) {
-                    for (TmdbMovieResult movie : topRatedPage.getResults()) {
-                        if (movie.getId() != null && chosenMovieIds.add(movie.getId())) {
-                            matchReasons.put(movie.getId(), "TOP_RATED_IN_" + indName);
-                            if (chosenMovieIds.size() >= TARGET_RECOMMENDATION_COUNT) {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Final safety net if still under 50: pull from global top-rated feed
-        if (chosenMovieIds.size() < TARGET_RECOMMENDATION_COUNT) {
-            SectionResponseDTO topRatedSection = homeFeedService.getSectionFeed(HomeFeedService.SECTION_TOP_RATED, 1);
-            if (topRatedSection != null && topRatedSection.getMovies() != null) {
-                for (MovieCardDTO movie : topRatedSection.getMovies()) {
-                    if (chosenMovieIds.add(movie.getId())) {
-                        matchReasons.put(movie.getId(), "GLOBAL_TOP_RATED");
-                        if (chosenMovieIds.size() >= TARGET_RECOMMENDATION_COUNT) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
     }
 }

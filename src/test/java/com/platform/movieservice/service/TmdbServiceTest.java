@@ -2,6 +2,7 @@ package com.platform.movieservice.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.movieservice.config.TmdbConfig;
+import com.platform.movieservice.dto.tmdb.TmdbGenre;
 import com.platform.movieservice.dto.tmdb.TmdbMovieResult;
 import com.platform.movieservice.dto.tmdb.TmdbPageResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +13,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
@@ -35,6 +38,7 @@ class TmdbServiceTest {
 
         ReflectionTestUtils.setField(tmdbService, "imageBaseUrl", "https://image.tmdb.org/t/p");
         ReflectionTestUtils.setField(tmdbService, "defaultLanguage", "en-US");
+        tmdbService.initGenreCache();
     }
 
     @Test
@@ -207,6 +211,85 @@ class TmdbServiceTest {
         assertNotNull(response);
         assertEquals(999L, response.getResults().get(0).getId());
         assertEquals("Tollywood Action Movie", response.getResults().get(0).getTitle());
+        mockServer.verify();
+    }
+
+    @Test
+    @DisplayName("Discover Movies with Genre Name translates to Numeric Genre ID")
+    void testDiscoverMovies_WithGenreName_TranslatesToGenreId() {
+        String json = """
+            {
+                "page": 1,
+                "results": [
+                    {"id": 888, "title": "Animated Film", "original_language": "en"}
+                ],
+                "total_pages": 1,
+                "total_results": 10
+            }
+            """;
+
+        mockServer.expect(requestTo("https://api.themoviedb.org/3/discover/movie?page=1&language=en-US&sort_by=popularity.desc&with_genres=16"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(json, MediaType.APPLICATION_JSON));
+
+        TmdbPageResponse<TmdbMovieResult> response = tmdbService.discoverMovies(null, "Animation", "popularity.desc", 1);
+
+        assertNotNull(response);
+        assertEquals(888L, response.getResults().get(0).getId());
+        mockServer.verify();
+    }
+
+    @Test
+    @DisplayName("Resolve Genre ID - Dynamically resolves standard and non-standard genre strings")
+    void testResolveGenreId() {
+        assertEquals(28, tmdbService.resolveGenreId("Action"));
+        assertEquals(28, tmdbService.resolveGenreId("ACTION"));
+        assertEquals(16, tmdbService.resolveGenreId("Animation"));
+        assertEquals(16, tmdbService.resolveGenreId("animation"));
+        assertEquals(14, tmdbService.resolveGenreId("Fantasy"));
+        assertEquals(9648, tmdbService.resolveGenreId("Mystery"));
+        assertEquals(878, tmdbService.resolveGenreId("Science Fiction"));
+        assertEquals(878, tmdbService.resolveGenreId("sci-fi"));
+        assertEquals(878, tmdbService.resolveGenreId("SCIFI"));
+        assertEquals(28, tmdbService.resolveGenreId("28"));
+        assertEquals(16, tmdbService.resolveGenreId("16"));
+        assertNull(tmdbService.resolveGenreId(""));
+        assertNull(tmdbService.resolveGenreId(null));
+    }
+
+    @Test
+    @DisplayName("Resolve Genre Name - Resolves TMDB genre ID to name")
+    void testResolveGenreName() {
+        assertEquals("Action", tmdbService.resolveGenreName(28));
+        assertEquals("Animation", tmdbService.resolveGenreName(16));
+        assertEquals("Mystery", tmdbService.resolveGenreName(9648));
+        assertNull(tmdbService.resolveGenreName(null));
+    }
+
+    @Test
+    @DisplayName("Fetch Movie Genres from TMDB - Success")
+    void testFetchMovieGenres_Success() {
+        String json = """
+            {
+                "genres": [
+                    {"id": 28, "name": "Action"},
+                    {"id": 16, "name": "Animation"}
+                ]
+            }
+            """;
+
+        mockServer.expect(requestTo("https://api.themoviedb.org/3/genre/movie/list?language=en-US"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(json, MediaType.APPLICATION_JSON));
+
+        List<TmdbGenre> genres = tmdbService.fetchMovieGenres();
+
+        assertNotNull(genres);
+        assertEquals(2, genres.size());
+        assertEquals(28, genres.get(0).getId());
+        assertEquals("Action", genres.get(0).getName());
+        assertEquals(16, genres.get(1).getId());
+        assertEquals("Animation", genres.get(1).getName());
         mockServer.verify();
     }
 

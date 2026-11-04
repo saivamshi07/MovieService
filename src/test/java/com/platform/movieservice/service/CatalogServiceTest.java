@@ -186,6 +186,10 @@ class CatalogServiceTest {
         assertEquals("Edward Norton", result.getTopCast().get(0).getName());
         assertEquals(1, result.getDirectors().size());
         assertEquals("David Fincher", result.getDirectors().get(0).getName());
+        assertEquals(1, result.getCrew().size());
+        assertEquals("David Fincher", result.getCrew().get(0).getName());
+        assertEquals("Directing", result.getCrew().get(0).getDepartment());
+        assertEquals("Director", result.getCrew().get(0).getJob());
 
         // Verified TMDB was not called since DB satisfied the request
         verify(tmdbService, never()).fetchMovieDetail(anyLong());
@@ -218,6 +222,102 @@ class CatalogServiceTest {
 
         // Verifies write-behind persistence was triggered
         verify(asyncPersistenceService, times(1)).persistMovieAndCredits(tmdbDetail);
+    }
+
+    @Test
+    @DisplayName("Batch: 3-Tier Cascade (Redis hit + DB hit + TMDB fallback)")
+    void testGetMoviesBatch_ThreeTierCascade() {
+        Long idRedis = 550L;
+        Long idDb = 157336L;
+        Long idTmdb = 822119L;
+        List<Long> inputIds = List.of(idRedis, idDb, idTmdb);
+
+        // Tier 1: Redis multiGet returns cached for 550, null for others
+        MovieDetailDTO cached550 = MovieDetailDTO.builder().id(idRedis).title("Fight Club").build();
+        when(valueOperations.multiGet(List.of("movie:details:550", "movie:details:157336", "movie:details:822119")))
+                .thenReturn(Arrays.asList(cached550, null, null));
+
+        // Tier 2: DB findAllById returns movie for 157336
+        Movie movie157336 = Movie.builder()
+                .id(idDb)
+                .title("Interstellar")
+                .originalLanguage("en")
+                .releaseDate(LocalDate.of(2014, 11, 5))
+                .build();
+        when(movieRepository.findAllById(List.of(idDb, idTmdb))).thenReturn(List.of(movie157336));
+        when(movieCastRepository.findByMovieIdOrderByCastOrderAsc(idDb)).thenReturn(List.of());
+        when(movieCrewRepository.findByMovieId(idDb)).thenReturn(List.of());
+
+        // Tier 3: TMDB fetchMovieDetail for 822119
+        TmdbMovieDetail tmdbDetail = new TmdbMovieDetail();
+        tmdbDetail.setId(idTmdb);
+        tmdbDetail.setTitle("Captain America: Brave New World");
+        tmdbDetail.setReleaseDate("2025-02-14");
+        tmdbDetail.setOriginalLanguage("en");
+        when(tmdbService.fetchMovieDetail(idTmdb)).thenReturn(tmdbDetail);
+
+        when(reviewRepository.calculateAverageRating(anyLong())).thenReturn(4.5);
+        when(reviewRepository.countByMovieId(anyLong())).thenReturn(10L);
+
+        List<MovieDetailDTO> results = catalogService.getMoviesBatch(inputIds);
+
+        assertNotNull(results);
+        assertEquals(3, results.size());
+        assertEquals(idRedis, results.get(0).getId());
+        assertEquals("Fight Club", results.get(0).getTitle());
+        assertEquals(idDb, results.get(1).getId());
+        assertEquals("Interstellar", results.get(1).getTitle());
+        assertEquals(idTmdb, results.get(2).getId());
+        assertEquals("Captain America: Brave New World", results.get(2).getTitle());
+
+        // Verify async persistence for TMDB item
+        verify(asyncPersistenceService, times(1)).persistMovieAndCredits(tmdbDetail);
+
+        // Verify Redis warm for DB and TMDB items
+        verify(valueOperations, times(1)).set(eq("movie:details:" + idDb), any(MovieDetailDTO.class), any(Duration.class));
+        verify(valueOperations, times(1)).set(eq("movie:details:" + idTmdb), any(MovieDetailDTO.class), any(Duration.class));
+    }
+
+    @Test
+    @DisplayName("Batch: Empty or null input returns empty list")
+    void testGetMoviesBatch_EmptyOrNull() {
+        assertTrue(catalogService.getMoviesBatch(null).isEmpty());
+        assertTrue(catalogService.getMoviesBatch(List.of()).isEmpty());
+        assertTrue(catalogService.getMovieCardsBatch(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("Batch: getMovieCardsBatch maps to MovieCardDTO successfully")
+    void testGetMovieCardsBatch() {
+        Long movieId = 550L;
+        MovieDetailDTO cached = MovieDetailDTO.builder()
+                .id(movieId)
+                .title("Fight Club")
+                .overview("Insomniac")
+                .posterUrl("poster.jpg")
+                .releaseYear(1999)
+                .originalLanguage("en")
+                .industry("HOLLYWOOD")
+                .genres(List.of("Drama"))
+                .tmdbVoteAverage(8.4)
+                .platformRating(4.8)
+                .platformRatingCount(100L)
+                .build();
+
+        when(valueOperations.multiGet(List.of("movie:details:550"))).thenReturn(List.of(cached));
+        when(reviewRepository.calculateAverageRating(movieId)).thenReturn(4.8);
+        when(reviewRepository.countByMovieId(movieId)).thenReturn(100L);
+
+        List<MovieCardDTO> cards = catalogService.getMovieCardsBatch(List.of(movieId));
+
+        assertNotNull(cards);
+        assertEquals(1, cards.size());
+        MovieCardDTO card = cards.get(0);
+        assertEquals(movieId, card.getId());
+        assertEquals("Fight Club", card.getTitle());
+        assertEquals("HOLLYWOOD", card.getIndustry());
+        assertEquals(4.8, card.getPlatformRating());
+        assertEquals(100L, card.getPlatformRatingCount());
     }
 
     @Test
@@ -294,10 +394,10 @@ class CatalogServiceTest {
     }
 
     @Test
-    @DisplayName("Multi-Search: Categorizes Movies, Actors, and Crew")
+    @DisplayName("Multi-Search: Categorizes Movies, Actors, and Crew with default ALL type")
     void testSearch_CategorizesResults() {
         String query = "nolan";
-        when(valueOperations.get("search:q:nolan:p:1")).thenReturn(null);
+        when(valueOperations.get("search:all:q:nolan:p:1")).thenReturn(null);
 
         Map<String, Object> rawMovie = Map.of(
                 "id", 157336,
@@ -329,7 +429,90 @@ class CatalogServiceTest {
         assertEquals("Christopher Nolan", result.getCrew().get(0).getName());
 
         // Verifies write to Redis query cache
-        verify(valueOperations, times(1)).set(eq("search:q:nolan:p:1"), any(MultiSearchResponseDTO.class), any(Duration.class));
+        verify(valueOperations, times(1)).set(eq("search:all:q:nolan:p:1"), any(MultiSearchResponseDTO.class), any(Duration.class));
+    }
+
+    @Test
+    @DisplayName("Search: type=MOVIE calls searchMovieRaw and returns only movies")
+    void testSearch_MovieType() {
+        String query = "interstellar";
+        when(valueOperations.get("search:movie:q:interstellar:p:1")).thenReturn(null);
+
+        Map<String, Object> rawMovie = Map.of(
+                "id", 157336,
+                "title", "Interstellar",
+                "release_date", "2014-11-05",
+                "original_language", "en"
+        );
+
+        when(tmdbService.searchMovieRaw(query, 1)).thenReturn(Map.of("results", List.of(rawMovie)));
+
+        MultiSearchResponseDTO result = catalogService.search(query, "MOVIE", 1);
+
+        assertNotNull(result);
+        assertEquals(1, result.getTotalMatches());
+        assertEquals(1, result.getMovies().size());
+        assertEquals("Interstellar", result.getMovies().get(0).getTitle());
+        assertTrue(result.getActors().isEmpty());
+        assertTrue(result.getCrew().isEmpty());
+
+        verify(tmdbService, times(1)).searchMovieRaw(query, 1);
+        verify(tmdbService, never()).searchMultiRaw(anyString(), anyInt());
+    }
+
+    @Test
+    @DisplayName("Search: type=PERSON calls searchPersonRaw and categorizes persons")
+    void testSearch_PersonType() {
+        String query = "nolan";
+        when(valueOperations.get("search:person:q:nolan:p:1")).thenReturn(null);
+
+        Map<String, Object> rawPerson = Map.of(
+                "id", 525,
+                "name", "Christopher Nolan",
+                "known_for_department", "Directing",
+                "known_for", List.of(Map.of("title", "Oppenheimer"))
+        );
+
+        when(tmdbService.searchPersonRaw(query, 1)).thenReturn(Map.of("results", List.of(rawPerson)));
+
+        MultiSearchResponseDTO result = catalogService.search(query, "person", 1);
+
+        assertNotNull(result);
+        assertEquals(1, result.getTotalMatches());
+        assertTrue(result.getMovies().isEmpty());
+        assertTrue(result.getActors().isEmpty());
+        assertEquals(1, result.getCrew().size());
+        assertEquals("Christopher Nolan", result.getCrew().get(0).getName());
+
+        verify(tmdbService, times(1)).searchPersonRaw(query, 1);
+        verify(tmdbService, never()).searchMultiRaw(anyString(), anyInt());
+    }
+
+    @Test
+    @DisplayName("Search: Redis Cache Hit by type avoids calling TMDB")
+    void testSearch_RedisCacheHit_ByType() {
+        String query = "inception";
+        MultiSearchResponseDTO cachedMovieSearch = MultiSearchResponseDTO.builder()
+                .query(query)
+                .totalMatches(1)
+                .movies(List.of(MovieCardDTO.builder().id(27205L).title("Inception").build()))
+                .actors(List.of())
+                .crew(List.of())
+                .build();
+
+        // Cached specifically under type movie
+        when(valueOperations.get("search:movie:q:inception:p:1")).thenReturn(cachedMovieSearch);
+
+        MultiSearchResponseDTO result = catalogService.search(query, "MOVIE", 1);
+
+        assertNotNull(result);
+        assertEquals(1, result.getMovies().size());
+        assertEquals("Inception", result.getMovies().get(0).getTitle());
+
+        // Verifies TMDB was not called
+        verify(tmdbService, never()).searchMovieRaw(anyString(), anyInt());
+        verify(tmdbService, never()).searchMultiRaw(anyString(), anyInt());
+        verify(tmdbService, never()).searchPersonRaw(anyString(), anyInt());
     }
 
     @Test

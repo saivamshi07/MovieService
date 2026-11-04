@@ -40,4 +40,7 @@ public class TmdbMovieResult {
     private Long voteCount;
 
     private Double popularity;
+
+    @JsonProperty("revenue")
+    private Long revenue;
 }

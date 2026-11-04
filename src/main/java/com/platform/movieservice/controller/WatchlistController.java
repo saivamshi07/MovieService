@@ -38,11 +38,26 @@ public class WatchlistController {
         return ResponseEntity.ok(watchlistService.checkWatchlistStatus(userId, id));
     }
 
+    @GetMapping("/watchlist/ids")
+    public ResponseEntity<java.util.List<Long>> getWatchlistMovieIds() {
+        UUID userId = UserContext.getRequiredUserId();
+        return ResponseEntity.ok(watchlistService.getWatchlistMovieIds(userId));
+    }
+
     @GetMapping("/watchlist/me")
     public ResponseEntity<Page<MovieCardDTO>> getMyWatchlist(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         UUID userId = UserContext.getRequiredUserId();
         return ResponseEntity.ok(watchlistService.getMyWatchlist(userId, page, size));
+    }
+
+    @GetMapping("/watchlist/users/{userId}")
+    public ResponseEntity<Page<MovieCardDTO>> getUserWatchlist(
+            @PathVariable UUID userId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        UUID requesterId = UserContext.getRequiredUserId();
+        return ResponseEntity.ok(watchlistService.getUserWatchlist(userId, requesterId, page, size));
     }
 }

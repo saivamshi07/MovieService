@@ -35,6 +35,7 @@ public class MovieDetailDTO implements Serializable {
     private List<PersonSummaryDTO> directors;
     private List<PersonSummaryDTO> writers;
     private List<CastMemberDTO> topCast;
+    private List<CrewMemberDTO> crew;
 
     @Data
     @Builder
@@ -57,5 +58,17 @@ public class MovieDetailDTO implements Serializable {
         private String character;
         private String profileUrl;
         private Integer order;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class CrewMemberDTO implements Serializable {
+        private Long id;
+        private String name;
+        private String department;
+        private String job;
+        private String profileUrl;
     }
 }

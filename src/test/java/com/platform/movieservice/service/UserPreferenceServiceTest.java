@@ -4,6 +4,7 @@ import com.platform.movieservice.dto.request.UserPreferenceRequest;
 import com.platform.movieservice.dto.response.PreferenceOptionsResponse;
 import com.platform.movieservice.dto.response.UserPreferenceResponse;
 import com.platform.movieservice.entity.UserPreference;
+import com.platform.movieservice.entity.enums.MovieGenre;
 import com.platform.movieservice.repository.UserPreferenceRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -75,6 +76,6 @@ class UserPreferenceServiceTest {
         PreferenceOptionsResponse options = userPreferenceService.getAllOptions();
         assertNotNull(options);
         assertEquals(5, options.getIndustries().size());
-        assertEquals(11, options.getGenres().size());
+        assertEquals(MovieGenre.values().length, options.getGenres().size());
     }
 }

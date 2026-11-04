@@ -1,12 +1,14 @@
 package com.platform.movieservice.controller;
 
+import com.platform.movieservice.dto.response.MovieCardDTO;
 import com.platform.movieservice.dto.response.SectionResponseDTO;
 import com.platform.movieservice.service.HomeFeedService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -32,12 +34,25 @@ public class HomeFeedController {
         return ResponseEntity.ok(homeFeedService.getSectionFeed(HomeFeedService.SECTION_TRENDING_WEEK, page, industry, genre));
     }
 
+    @GetMapping("/popular/top")
+    public ResponseEntity<List<MovieCardDTO>> getTopPopular(
+            @RequestParam String industry,
+            @RequestParam String genre,
+            @RequestParam(required = false) Long excludeMovieId,
+            @RequestParam(required = false) Long excludeId) {
+        Long exclude = excludeMovieId != null ? excludeMovieId : excludeId;
+        return ResponseEntity.ok(homeFeedService.getTopPopularMovies(industry, genre, exclude));
+    }
+
     @GetMapping("/popular")
     public ResponseEntity<SectionResponseDTO> getPopular(
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(required = false) String industry,
-            @RequestParam(required = false) String genre) {
-        return ResponseEntity.ok(homeFeedService.getSectionFeed(HomeFeedService.SECTION_POPULAR, page, industry, genre));
+            @RequestParam(required = false) String genre,
+            @RequestParam(required = false) Long excludeMovieId,
+            @RequestParam(required = false) Long excludeId) {
+        Long exclude = excludeMovieId != null ? excludeMovieId : excludeId;
+        return ResponseEntity.ok(homeFeedService.getSectionFeed(HomeFeedService.SECTION_POPULAR, page, industry, genre, exclude));
     }
 
     @GetMapping("/top-rated")
@@ -61,7 +76,7 @@ public class HomeFeedController {
      */
     @GetMapping
     public ResponseEntity<Map<String, Object>> getUnifiedHomeFeed() {
-        Map<String, Object> feed = new HashMap<>();
+        Map<String, Object> feed = new LinkedHashMap<>();
         feed.put("trendingToday", homeFeedService.getSectionFeed(HomeFeedService.SECTION_TRENDING_TODAY, 1));
         feed.put("trendingWeek", homeFeedService.getSectionFeed(HomeFeedService.SECTION_TRENDING_WEEK, 1));
         feed.put("popular", homeFeedService.getSectionFeed(HomeFeedService.SECTION_POPULAR, 1));

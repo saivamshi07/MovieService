@@ -89,6 +89,7 @@ public class ProactivePrewarmService {
         List<MovieDetailDTO.PersonSummaryDTO> directors = List.of();
         List<MovieDetailDTO.PersonSummaryDTO> writers = List.of();
         List<MovieDetailDTO.CastMemberDTO> topCast = List.of();
+        List<MovieDetailDTO.CrewMemberDTO> crewMembers = List.of();
 
         if (detail.getCredits() != null) {
             if (detail.getCredits().getCrew() != null) {
@@ -107,6 +108,16 @@ public class ProactivePrewarmService {
                         .map(c -> MovieDetailDTO.PersonSummaryDTO.builder()
                                 .id(c.getId())
                                 .name(c.getName())
+                                .job(c.getJob())
+                                .profileUrl(tmdbService.buildProfileUrl(c.getProfilePath(), "w185"))
+                                .build())
+                        .toList();
+
+                crewMembers = detail.getCredits().getCrew().stream()
+                        .map(c -> MovieDetailDTO.CrewMemberDTO.builder()
+                                .id(c.getId())
+                                .name(c.getName())
+                                .department(c.getDepartment())
                                 .job(c.getJob())
                                 .profileUrl(tmdbService.buildProfileUrl(c.getProfilePath(), "w185"))
                                 .build())
@@ -148,6 +159,7 @@ public class ProactivePrewarmService {
                 .directors(directors)
                 .writers(writers)
                 .topCast(topCast)
+                .crew(crewMembers)
                 .build();
     }
 }

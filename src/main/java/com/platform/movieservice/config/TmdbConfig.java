@@ -6,13 +6,14 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRequest;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.http.client.support.HttpRequestWrapper;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.time.Duration;
 
 @Configuration
@@ -27,22 +28,28 @@ public class TmdbConfig {
     @Value("${tmdb.api.api-key:}")
     private String apiKey;
 
-    @Value("${tmdb.connect-timeout-ms:3000}")
+    @Value("${tmdb.connect-timeout-ms:5000}")
     private int connectTimeoutMs;
 
-    @Value("${tmdb.read-timeout-ms:5000}")
+    @Value("${tmdb.read-timeout-ms:8000}")
     private int readTimeoutMs;
 
     @Bean
     public RestClient tmdbRestClient() {
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(Duration.ofMillis(connectTimeoutMs));
+        HttpClient httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_2)
+                .connectTimeout(Duration.ofMillis(connectTimeoutMs))
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
         requestFactory.setReadTimeout(Duration.ofMillis(readTimeoutMs));
 
         RestClient.Builder builder = RestClient.builder()
                 .baseUrl(baseUrl)
                 .requestFactory(requestFactory)
-                .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE);
+                .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                .defaultHeader(HttpHeaders.USER_AGENT, "MovieService/1.0 (Macintosh; SpringBoot/4.1)");
 
         String token = StringUtils.hasText(bearerToken) ? bearerToken.trim() : null;
         String key = StringUtils.hasText(apiKey) ? apiKey.trim() : null;

@@ -25,6 +25,9 @@ public class MovieCardDTO implements Serializable {
     private String industry;
     private List<String> genres;
     private Double tmdbVoteAverage;
+    private Long tmdbVoteCount;
+    private Double popularity;
+    private Long revenue;
     private Double platformRating;
     private Long platformRatingCount;
     private String matchScore;

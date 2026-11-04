@@ -24,6 +24,11 @@ public class GlobalExceptionHandler {
         return buildResponse(HttpStatus.UNAUTHORIZED, ex.getMessage(), null);
     }
 
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<Map<String, Object>> handleForbidden(ForbiddenException ex) {
+        return buildResponse(HttpStatus.FORBIDDEN, ex.getMessage(), null);
+    }
+
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(BadRequestException ex) {
         return buildResponse(HttpStatus.BAD_REQUEST, ex.getMessage(), null);

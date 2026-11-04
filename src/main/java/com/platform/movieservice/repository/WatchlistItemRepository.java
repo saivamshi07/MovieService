@@ -16,6 +16,9 @@ public interface WatchlistItemRepository extends JpaRepository<WatchlistItem, UU
 
     boolean existsByUserIdAndMovieId(UUID userId, Long movieId);
 
+    @org.springframework.data.jpa.repository.Query("SELECT w.movieId FROM WatchlistItem w WHERE w.userId = :userId")
+    java.util.List<Long> findMovieIdsByUserId(@org.springframework.data.repository.query.Param("userId") UUID userId);
+
     Optional<WatchlistItem> findByUserIdAndMovieId(UUID userId, Long movieId);
 
     void deleteByUserIdAndMovieId(UUID userId, Long movieId);

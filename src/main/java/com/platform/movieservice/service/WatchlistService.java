@@ -24,6 +24,7 @@ public class WatchlistService {
 
     private final WatchlistItemRepository watchlistItemRepository;
     private final CatalogService catalogService;
+    private final UserAccessService userAccessService;
 
     @Transactional
     public WatchlistStatusResponse addToWatchlist(UUID userId, Long movieId) {
@@ -61,36 +62,28 @@ public class WatchlistService {
                 .build();
     }
 
+    public java.util.List<Long> getWatchlistMovieIds(UUID userId) {
+        return watchlistItemRepository.findMovieIdsByUserId(userId);
+    }
+
     public Page<MovieCardDTO> getMyWatchlist(UUID userId, int page, int size) {
         PageRequest pageRequest = PageRequest.of(Math.max(0, page), Math.max(1, size));
         Page<WatchlistItem> itemsPage = watchlistItemRepository.findByUserIdOrderByCreatedAtDesc(userId, pageRequest);
 
-        List<MovieCardDTO> movieCards = new ArrayList<>();
-        for (WatchlistItem item : itemsPage.getContent()) {
-            try {
-                MovieDetailDTO detail = catalogService.getMovieDetail(item.getMovieId());
-                if (detail != null) {
-                    movieCards.add(MovieCardDTO.builder()
-                            .id(detail.getId())
-                            .title(detail.getTitle())
-                            .overview(detail.getOverview())
-                            .posterUrl(detail.getPosterUrl())
-                            .backdropUrl(detail.getBackdropUrl())
-                            .releaseDate(detail.getReleaseDate())
-                            .releaseYear(detail.getReleaseYear())
-                            .originalLanguage(detail.getOriginalLanguage())
-                            .industry(detail.getIndustry())
-                            .genres(detail.getGenres())
-                            .tmdbVoteAverage(detail.getTmdbVoteAverage())
-                            .platformRating(detail.getPlatformRating())
-                            .platformRatingCount(detail.getPlatformRatingCount())
-                            .build());
-                }
-            } catch (Exception e) {
-                log.warn("Failed to hydrate movie {} in watchlist: {}", item.getMovieId(), e.getMessage());
-            }
-        }
+        List<Long> movieIds = itemsPage.getContent().stream()
+                .map(WatchlistItem::getMovieId)
+                .toList();
+
+        List<MovieCardDTO> movieCards = catalogService.getMovieCardsBatch(movieIds);
 
         return new PageImpl<>(movieCards, pageRequest, itemsPage.getTotalElements());
+    }
+
+    /**
+     * Retrieves target user's watchlist with privacy and friendship access authorization.
+     */
+    public Page<MovieCardDTO> getUserWatchlist(UUID targetUserId, UUID requesterId, int page, int size) {
+        userAccessService.validateWatchlistAccess(targetUserId, requesterId);
+        return getMyWatchlist(targetUserId, page, size);
     }
 }

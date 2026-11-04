@@ -80,14 +80,30 @@ class HomeFeedControllerTest {
     @Test
     @DisplayName("GET /api/v1/movies/home/popular calls HomeFeedService correctly")
     void testGetPopular() {
-        when(homeFeedService.getSectionFeed(HomeFeedService.SECTION_POPULAR, 1, null, "ACTION"))
+        when(homeFeedService.getSectionFeed(HomeFeedService.SECTION_POPULAR, 1, null, "ACTION", 550L))
                 .thenReturn(sampleSection);
 
-        ResponseEntity<SectionResponseDTO> response = homeFeedController.getPopular(1, null, "ACTION");
+        ResponseEntity<SectionResponseDTO> response = homeFeedController.getPopular(1, null, "ACTION", 550L, null);
 
         assertNotNull(response);
         assertEquals(200, response.getStatusCode().value());
-        verify(homeFeedService, times(1)).getSectionFeed(HomeFeedService.SECTION_POPULAR, 1, null, "ACTION");
+        verify(homeFeedService, times(1)).getSectionFeed(HomeFeedService.SECTION_POPULAR, 1, null, "ACTION", 550L);
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/movies/home/popular/top calls HomeFeedService correctly")
+    void testGetTopPopular() {
+        MovieCardDTO card = MovieCardDTO.builder().id(100L).title("Interstellar").build();
+        when(homeFeedService.getTopPopularMovies("HOLLYWOOD", "ACTION", 550L))
+                .thenReturn(List.of(card));
+
+        ResponseEntity<List<MovieCardDTO>> response = homeFeedController.getTopPopular("HOLLYWOOD", "ACTION", 550L, null);
+
+        assertNotNull(response);
+        assertEquals(200, response.getStatusCode().value());
+        assertEquals(1, response.getBody().size());
+        assertEquals(100L, response.getBody().get(0).getId());
+        verify(homeFeedService, times(1)).getTopPopularMovies("HOLLYWOOD", "ACTION", 550L);
     }
 
     @Test
